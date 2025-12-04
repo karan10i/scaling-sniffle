@@ -1,32 +1,16 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Auth from './components/Auth';
+import FriendSearch from './components/FriendSearch';
+import UserProfile from './components/UserProfile';
 
-function TopBar({ currentUser, onLogout, onAddFriend }) {
-  const [friendName, setFriendName] = useState('');
-
+function TopBar({ currentUser, onLogout }) {
   return (
     <div style={styles.topBar}>
       <div style={styles.userInfo}>
-        <span style={{ color: '#fff' }}>Welcome, <strong>{currentUser}</strong></span>
+        <span style={{ color: '#fff' }}>🗨️ Chat App</span>
       </div>
-      <div style={styles.addFriendSection}>
-        <input
-          style={styles.friendInput}
-          placeholder="Friend's username"
-          value={friendName}
-          onChange={(e) => setFriendName(e.target.value)}
-        />
-        <button
-          style={styles.addButton}
-          onClick={() => {
-            if (friendName.trim()) {
-              onAddFriend(friendName);
-              setFriendName('');
-            }
-          }}
-        >
-          Add Friend
-        </button>
+      <div style={styles.userGreeting}>
+        <span style={{ color: '#fff' }}>Welcome, <strong>{currentUser}</strong></span>
       </div>
       <button style={styles.logoutButton} onClick={onLogout}>
         Logout
@@ -35,17 +19,30 @@ function TopBar({ currentUser, onLogout, onAddFriend }) {
   );
 }
 
-function SideBar({ friends }) {
+function SideBar({ token, friends, onFriendsUpdated }) {
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const handleFriendAdded = () => {
+    setRefreshKey(refreshKey + 1);
+    onFriendsUpdated();
+  };
+
   return (
     <div style={styles.sideBar}>
-      <h3>Friends</h3>
+      <UserProfile token={token} key={refreshKey} />
+      
+      <h3>Add Friends</h3>
+      <FriendSearch token={token} onFriendAdded={handleFriendAdded} />
+
+      <h3>Your Friends</h3>
       <ul style={styles.friendList}>
         {friends.length === 0 ? (
           <li style={styles.noFriends}>No friends yet</li>
         ) : (
-          friends.map((friend, index) => (
-            <li key={index} style={styles.friendItem}>
-              {friend}
+          friends.map((friend) => (
+            <li key={friend.id} style={styles.friendItem}>
+              <p style={styles.friendName}>{friend.user_name}</p>
+              <p style={styles.friendUsername}>@{friend.username}</p>
             </li>
           ))
         )}
@@ -67,10 +64,29 @@ function App() {
   const [token, setToken] = useState(null);
   const [username, setUsername] = useState(null);
   const [friends, setFriends] = useState([]);
+  const [loading, setLoading] = useState(false);
 
   const handleLogin = (accessToken, user) => {
     setToken(accessToken);
     setUsername(user);
+    fetchFriends(accessToken);
+  };
+
+  const fetchFriends = async (accessToken) => {
+    setLoading(true);
+    try {
+      const res = await fetch('http://localhost:8000/api/list-friends/', {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+        },
+      });
+
+      const data = await res.json();
+      setFriends(data.friends || []);
+    } catch (err) {
+      console.error('Fetch friends error:', err);
+    }
+    setLoading(false);
   };
 
   const handleLogout = () => {
@@ -79,14 +95,9 @@ function App() {
     setFriends([]);
   };
 
-  const handleAddFriend = async (friendUsername) => {
-    // For now, just add to local state
-    // Later we'll connect to backend
-    if (!friends.includes(friendUsername)) {
-      setFriends([...friends, friendUsername]);
-      alert(`Added ${friendUsername} as friend!`);
-    } else {
-      alert('Already in your friends list!');
+  const handleFriendsUpdated = () => {
+    if (token) {
+      fetchFriends(token);
     }
   };
 
@@ -98,13 +109,9 @@ function App() {
   // If logged in, show main chat app
   return (
     <div>
-      <TopBar
-        currentUser={username}
-        onLogout={handleLogout}
-        onAddFriend={handleAddFriend}
-      />
+      <TopBar currentUser={username} onLogout={handleLogout} />
       <div style={{ display: 'flex' }}>
-        <SideBar friends={friends} />
+        <SideBar token={token} friends={friends} onFriendsUpdated={handleFriendsUpdated} />
         <ChatWindow />
       </div>
     </div>
@@ -123,24 +130,9 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
   },
-  addFriendSection: {
-    display: 'flex',
-    gap: '10px',
-  },
-  friendInput: {
-    padding: '8px 12px',
-    borderRadius: '5px',
-    border: 'none',
-    fontSize: '14px',
-    width: '200px',
-  },
-  addButton: {
-    padding: '8px 15px',
-    background: '#28a745',
-    color: '#fff',
-    border: 'none',
-    borderRadius: '5px',
-    cursor: 'pointer',
+  userGreeting: {
+    flex: 1,
+    textAlign: 'center',
   },
   logoutButton: {
     padding: '8px 15px',
@@ -151,11 +143,12 @@ const styles = {
     cursor: 'pointer',
   },
   sideBar: {
-    width: '250px',
+    width: '280px',
     background: '#f4f4f4',
     padding: '20px',
     minHeight: 'calc(100vh - 60px)',
     borderRight: '1px solid #ddd',
+    overflowY: 'auto',
   },
   friendList: {
     listStyle: 'none',
@@ -170,9 +163,20 @@ const styles = {
     cursor: 'pointer',
     boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
   },
+  friendName: {
+    margin: 0,
+    fontWeight: 'bold',
+    fontSize: '14px',
+  },
+  friendUsername: {
+    margin: '5px 0 0 0',
+    fontSize: '12px',
+    color: '#666',
+  },
   noFriends: {
     color: '#888',
     fontStyle: 'italic',
+    padding: '10px',
   },
   chatWindow: {
     flex: 1,
