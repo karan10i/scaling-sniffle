@@ -117,3 +117,111 @@ class UserProfileView(generics.GenericAPIView):
             'user_name': profile.user_name,
             'friend_count': friend_count,
         })
+
+# Send friend request
+class SendFriendRequestView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        to_user_id = request.data.get('to_user_id')
+        
+        if not to_user_id:
+            return Response({'error': 'to_user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            to_user = User.objects.get(id=to_user_id)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        if request.user == to_user:
+            return Response({'error': 'Cannot send request to yourself'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        from .models import FriendRequest, Friend
+        
+        # Check if already friends
+        if Friend.objects.filter(user=request.user, friend=to_user).exists():
+            return Response({'error': 'Already friends'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check if request already exists
+        existing = FriendRequest.objects.filter(from_user=request.user, to_user=to_user).first()
+        if existing:
+            return Response({'error': f'Request already {existing.status}'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Create request
+        FriendRequest.objects.create(from_user=request.user, to_user=to_user)
+        
+        return Response({'message': 'Friend request sent!'}, status=status.HTTP_201_CREATED)
+
+# Get pending friend requests
+class ListPendingRequestsView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        from .models import FriendRequest
+        pending = FriendRequest.objects.filter(to_user=request.user, status='pending')
+        
+        results = []
+        for req in pending:
+            from_profile = Profile.objects.get(user=req.from_user)
+            results.append({
+                'request_id': req.id,
+                'from_user_id': req.from_user.id,
+                'username': req.from_user.username,
+                'user_name': from_profile.user_name,
+            })
+        
+        return Response({'requests': results, 'count': len(results)})
+
+# Accept friend request
+class AcceptFriendRequestView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        request_id = request.data.get('request_id')
+        
+        if not request_id:
+            return Response({'error': 'request_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            from .models import FriendRequest, Friend
+            friend_req = FriendRequest.objects.get(id=request_id, to_user=request.user)
+        except:
+            return Response({'error': 'Request not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        if friend_req.status != 'pending':
+            return Response({'error': 'Request is not pending'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Update request status
+        friend_req.status = 'accepted'
+        friend_req.save()
+        
+        # Create friendship (both ways for mutual friendship)
+        Friend.objects.get_or_create(user=friend_req.from_user, friend=friend_req.to_user)
+        Friend.objects.get_or_create(user=friend_req.to_user, friend=friend_req.from_user)
+        
+        return Response({'message': 'Friend request accepted!'}, status=status.HTTP_200_OK)
+
+# Reject friend request
+class RejectFriendRequestView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        request_id = request.data.get('request_id')
+        
+        if not request_id:
+            return Response({'error': 'request_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            from .models import FriendRequest
+            friend_req = FriendRequest.objects.get(id=request_id, to_user=request.user)
+        except:
+            return Response({'error': 'Request not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        if friend_req.status != 'pending':
+            return Response({'error': 'Request is not pending'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Update request status
+        friend_req.status = 'rejected'
+        friend_req.save()
+        
+        return Response({'message': 'Friend request rejected!'}, status=status.HTTP_200_OK)
