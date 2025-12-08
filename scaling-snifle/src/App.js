@@ -180,34 +180,32 @@ function SideBar({ friends, onSelectFriend, token, onFriendsUpdated }) {
 
 function ChatUI({ selectedFriend, token }) {
   const [message, setMessage] = useState("");
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages] = useState([]); // RAM-only storage
 
-  const fetchMessages = React.useCallback(() => {
+  const fetchVaultMessages = React.useCallback(() => {
     if (selectedFriend && token) {
       fetch(`http://localhost:8000/api/get-messages/?user_id=${selectedFriend.id}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       })
         .then(res => res.json())
-        .then(data => setMessages(data.messages || []))
+        .then(data => {
+          // Load vault messages into RAM
+          const vaultMessages = (data.messages || []).map(msg => ({
+            ...msg,
+            is_saved: true
+          }));
+          setMessages(vaultMessages);
+        })
         .catch(err => console.error(err));
     }
   }, [selectedFriend, token]);
 
-  // Fetch messages when friend is selected
+  // Load vault messages when friend is selected
   React.useEffect(() => {
     if (selectedFriend && token) {
-      fetchMessages();
-      // Mark messages as seen
-      fetch('http://localhost:8000/api/mark-seen/', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ sender_id: selectedFriend.id })
-      });
+      fetchVaultMessages();
     }
-  }, [selectedFriend, token, fetchMessages]);
+  }, [selectedFriend, token, fetchVaultMessages]);
 
   const handleSendMessage = async () => {
     if (message.trim()) {
@@ -225,8 +223,10 @@ function ChatUI({ selectedFriend, token }) {
         });
         
         if (res.ok) {
+          const data = await res.json();
+          // Add message to RAM-only state
+          setMessages(prev => [...prev, data.message_data]);
           setMessage("");
-          fetchMessages(); // Refresh messages
         } else {
           const data = await res.json();
           alert(data.error || 'Error sending message');
@@ -237,7 +237,7 @@ function ChatUI({ selectedFriend, token }) {
     }
   };
 
-  const handleSaveMessage = async (messageId) => {
+  const handleSaveMessage = async (msg) => {
     try {
       const res = await fetch('http://localhost:8000/api/save-to-vault/', {
         method: 'POST',
@@ -245,12 +245,20 @@ function ChatUI({ selectedFriend, token }) {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ message_id: messageId })
+        body: JSON.stringify({
+          sender_id: msg.sender_id,
+          content: msg.content,
+          timestamp: msg.timestamp
+        })
       });
       
       if (res.ok) {
+        const data = await res.json();
         alert('Message saved to vault!');
-        fetchMessages();
+        // Update message to show it's saved
+        setMessages(prev => prev.map(m => 
+          m.id === msg.id ? { ...m, is_saved: true, id: data.message_id } : m
+        ));
       } else {
         const data = await res.json();
         alert(data.error || 'Error saving message');
@@ -260,26 +268,9 @@ function ChatUI({ selectedFriend, token }) {
     }
   };
 
-  const handleDeleteMessage = async (messageId) => {
-    try {
-      const res = await fetch('http://localhost:8000/api/delete-message/', {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ message_id: messageId })
-      });
-      
-      if (res.ok) {
-        fetchMessages();
-      } else {
-        const data = await res.json();
-        alert(data.error || 'Error deleting message');
-      }
-    } catch (err) {
-      console.error('Delete message error:', err);
-    }
+  const handleDeleteMessage = (messageId) => {
+    // Just remove from RAM (ephemeral)
+    setMessages(prev => prev.filter(m => m.id !== messageId));
   };
 
   return (
@@ -318,7 +309,7 @@ function ChatUI({ selectedFriend, token }) {
                 <div style={{ display: 'flex', gap: '5px', marginLeft: '10px' }}>
                   {msg.sender_username === selectedFriend.username && !msg.is_saved && (
                     <button
-                      onClick={() => handleSaveMessage(msg.id)}
+                      onClick={() => handleSaveMessage(msg)}
                       style={{
                         padding: '5px 10px',
                         background: '#4caf50',
@@ -333,7 +324,7 @@ function ChatUI({ selectedFriend, token }) {
                       📌 Save
                     </button>
                   )}
-                  {msg.sender_username === selectedFriend.username && (
+                  {!msg.is_saved && (
                     <button
                       onClick={() => handleDeleteMessage(msg.id)}
                       style={{
@@ -345,6 +336,7 @@ function ChatUI({ selectedFriend, token }) {
                         cursor: 'pointer',
                         fontSize: '12px'
                       }}
+                      title="Delete (RAM only)"
                     >
                       🗑️
                     </button>
@@ -590,13 +582,17 @@ function App() {
       });
   };
 
+  const handleLogout = () => {
+    setToken(null); // Messages automatically cleared from RAM
+  };
+
   if (!token) {
     return <Auth onLogin={(t, u) => { setToken(t); setUsername(u); }} />;
   }
 
   return (
     <div>
-      <TopBar currentUser={username} onLogout={() => setToken(null)} onShowRequests={() => setShowRequests(true)} onShowVault={() => setShowVault(true)} />
+      <TopBar currentUser={username} onLogout={handleLogout} onShowRequests={() => setShowRequests(true)} onShowVault={() => setShowVault(true)} />
       <div style={{ display: 'flex' }}>
         <SideBar friends={friends} onSelectFriend={setSelectedFriend} token={token} onFriendsUpdated={() => {
           fetch('http://localhost:8000/api/list-friends/', {
