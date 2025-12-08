@@ -30,3 +30,15 @@ class FriendRequest(models.Model):
 
     def __str__(self):
         return f"{self.from_user.username} -> {self.to_user.username} ({self.status})"
+    
+class Message(models.Model):
+    sender = models.ForeignKey(User, on_delete=models.CASCADE, related_name='sent_messages')
+    receiver = models.ForeignKey(User, on_delete=models.CASCADE, related_name='received_messages')
+    content = models.TextField()
+    timestamp = models.DateTimeField(auto_now_add=True)
+    seen = models.BooleanField(default=False)  # True when receiver views the message
+    is_saved = models.BooleanField(default=False)  # True if receiver saves to vault
+    saved_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='saved_messages', null=True, blank=True)  # Who saved it
+
+    def __str__(self):
+        return f"From {self.sender.username} to {self.receiver.username} at {self.timestamp}"
