@@ -1,7 +1,9 @@
 from django.urls import path
 from .views import (
     SignupView, LoginView, SearchUsersView, AddFriendView, ListFriendsView, UserProfileView,
-    SendFriendRequestView, ListPendingRequestsView, AcceptFriendRequestView, RejectFriendRequestView
+    SendFriendRequestView, ListPendingRequestsView, AcceptFriendRequestView, RejectFriendRequestView,
+    SendMessageView, GetMessagesView, MarkMessagesSeenView, DeleteMessageView,
+    SaveMessageToVaultView, ListVaultMessagesView, DeleteFromVaultView
 )
 
 urlpatterns = [
@@ -15,4 +17,15 @@ urlpatterns = [
     path('pending-requests/', ListPendingRequestsView.as_view(), name='pending-requests'),
     path('accept-request/', AcceptFriendRequestView.as_view(), name='accept-request'),
     path('reject-request/', RejectFriendRequestView.as_view(), name='reject-request'),
+    
+    # Messaging endpoints
+    path('send-message/', SendMessageView.as_view(), name='send-message'),
+    path('get-messages/', GetMessagesView.as_view(), name='get-messages'),
+    path('mark-seen/', MarkMessagesSeenView.as_view(), name='mark-seen'),
+    path('delete-message/', DeleteMessageView.as_view(), name='delete-message'),
+    
+    # Vault endpoints
+    path('save-to-vault/', SaveMessageToVaultView.as_view(), name='save-to-vault'),
+    path('list-vault/', ListVaultMessagesView.as_view(), name='list-vault'),
+    path('delete-from-vault/', DeleteFromVaultView.as_view(), name='delete-from-vault'),
 ]

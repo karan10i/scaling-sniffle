@@ -4,7 +4,7 @@ from django.contrib.auth.models import User
 from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from .models import Profile
+from .models import Profile, Message
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 from django.db.models import Q
@@ -225,3 +225,189 @@ class RejectFriendRequestView(generics.GenericAPIView):
         friend_req.save()
         
         return Response({'message': 'Friend request rejected!'}, status=status.HTTP_200_OK)
+
+# ============ MESSAGING ENDPOINTS ============
+
+# Send a message to a friend
+class SendMessageView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        receiver_id = request.data.get('receiver_id')
+        content = request.data.get('content')
+        
+        if not receiver_id or not content:
+            return Response({'error': 'receiver_id and content are required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            receiver = User.objects.get(id=receiver_id)
+        except User.DoesNotExist:
+            return Response({'error': 'Receiver not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Check if they are friends
+        from .models import Friend
+        if not Friend.objects.filter(user=request.user, friend=receiver).exists():
+            return Response({'error': 'You can only message friends'}, status=status.HTTP_403_FORBIDDEN)
+        
+        # Create message
+        message = Message.objects.create(
+            sender=request.user,
+            receiver=receiver,
+            content=content
+        )
+        
+        return Response({
+            'message': 'Message sent!',
+            'message_id': message.id,
+            'timestamp': message.timestamp
+        }, status=status.HTTP_201_CREATED)
+
+# Get messages between current user and another user
+class GetMessagesView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        other_user_id = request.query_params.get('user_id')
+        
+        if not other_user_id:
+            return Response({'error': 'user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            other_user = User.objects.get(id=other_user_id)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get all unsaved messages between these two users
+        # Ephemeral logic: only show messages that haven't been saved (or are saved by the current user)
+        messages = Message.objects.filter(
+            Q(sender=request.user, receiver=other_user) | Q(sender=other_user, receiver=request.user)
+        ).filter(
+            Q(is_saved=False) | Q(saved_by=request.user)
+        ).order_by('timestamp')
+        
+        results = []
+        for msg in messages:
+            results.append({
+                'id': msg.id,
+                'sender_id': msg.sender.id,
+                'sender_username': msg.sender.username,
+                'receiver_id': msg.receiver.id,
+                'content': msg.content,
+                'timestamp': msg.timestamp,
+                'seen': msg.seen,
+                'is_saved': msg.is_saved and msg.saved_by == request.user,  # Only show save status if current user saved it
+            })
+        
+        return Response({'messages': results, 'count': len(results)})
+
+# Mark messages as seen
+class MarkMessagesSeenView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        sender_id = request.data.get('sender_id')
+        
+        if not sender_id:
+            return Response({'error': 'sender_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Mark all unseen messages from sender to current user as seen
+        Message.objects.filter(
+            sender_id=sender_id,
+            receiver=request.user,
+            seen=False
+        ).update(seen=True)
+        
+        return Response({'message': 'Messages marked as seen'}, status=status.HTTP_200_OK)
+
+# Delete a message (only receiver can delete)
+class DeleteMessageView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def delete(self, request):
+        message_id = request.data.get('message_id')
+        
+        if not message_id:
+            return Response({'error': 'message_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            message = Message.objects.get(id=message_id)
+        except Message.DoesNotExist:
+            return Response({'error': 'Message not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Only receiver can delete (unless it's saved, then only the saver can delete)
+        if message.is_saved:
+            if message.saved_by != request.user:
+                return Response({'error': 'You cannot delete this message'}, status=status.HTTP_403_FORBIDDEN)
+        else:
+            if message.receiver != request.user:
+                return Response({'error': 'Only the receiver can delete messages'}, status=status.HTTP_403_FORBIDDEN)
+        
+        message.delete()
+        return Response({'message': 'Message deleted'}, status=status.HTTP_200_OK)
+
+# ============ VAULT ENDPOINTS ============
+
+# Save a message to vault (Silent Save)
+class SaveMessageToVaultView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        message_id = request.data.get('message_id')
+        
+        if not message_id:
+            return Response({'error': 'message_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            message = Message.objects.get(id=message_id)
+        except Message.DoesNotExist:
+            return Response({'error': 'Message not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Only receiver can save
+        if message.receiver != request.user:
+            return Response({'error': 'You can only save messages sent to you'}, status=status.HTTP_403_FORBIDDEN)
+        
+        # Save the message
+        message.is_saved = True
+        message.saved_by = request.user
+        message.save()
+        
+        return Response({'message': 'Message saved to vault'}, status=status.HTTP_200_OK)
+
+# List all saved messages (Vault)
+class ListVaultMessagesView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        # Get all messages saved by current user
+        messages = Message.objects.filter(saved_by=request.user, is_saved=True).order_by('-timestamp')
+        
+        results = []
+        for msg in messages:
+            results.append({
+                'id': msg.id,
+                'sender_id': msg.sender.id,
+                'sender_username': msg.sender.username,
+                'content': msg.content,
+                'timestamp': msg.timestamp,
+            })
+        
+        return Response({'messages': results, 'count': len(results)})
+
+# Delete message from vault
+class DeleteFromVaultView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def delete(self, request):
+        message_id = request.data.get('message_id')
+        
+        if not message_id:
+            return Response({'error': 'message_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            message = Message.objects.get(id=message_id, saved_by=request.user, is_saved=True)
+        except Message.DoesNotExist:
+            return Response({'error': 'Message not found in vault'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Delete the message
+        message.delete()
+        return Response({'message': 'Message removed from vault'}, status=status.HTTP_200_OK)
