@@ -36,7 +36,11 @@ class Message(models.Model):
     receiver = models.ForeignKey(User, on_delete=models.CASCADE, related_name='received_messages')
     content = models.TextField()
     timestamp = models.DateTimeField(auto_now_add=True)
-    seen = models.BooleanField(default=False)  # True when receiver views the message
+    
+    # Delivery tracking
+    delivered = models.BooleanField(default=False)  # True when receiver opens the chat
+    
+    # Vault tracking (Silent Save)
     is_saved = models.BooleanField(default=False)  # True if receiver saves to vault
     saved_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='saved_messages', null=True, blank=True)  # Who saved it
 

@@ -180,32 +180,28 @@ function SideBar({ friends, onSelectFriend, token, onFriendsUpdated }) {
 
 function ChatUI({ selectedFriend, token }) {
   const [message, setMessage] = useState("");
-  const [messages, setMessages] = useState([]); // RAM-only storage
+  const [messages, setMessages] = useState([]); // Server-stored messages
 
-  const fetchVaultMessages = React.useCallback(() => {
+  const fetchMessages = React.useCallback(() => {
     if (selectedFriend && token) {
       fetch(`http://localhost:8000/api/get-messages/?user_id=${selectedFriend.id}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       })
         .then(res => res.json())
         .then(data => {
-          // Load vault messages into RAM
-          const vaultMessages = (data.messages || []).map(msg => ({
-            ...msg,
-            is_saved: true
-          }));
-          setMessages(vaultMessages);
+          // Load all messages from server (including undelivered and vault)
+          setMessages(data.messages || []);
         })
         .catch(err => console.error(err));
     }
   }, [selectedFriend, token]);
 
-  // Load vault messages when friend is selected
+  // Load messages when friend is selected
   React.useEffect(() => {
     if (selectedFriend && token) {
-      fetchVaultMessages();
+      fetchMessages();
     }
-  }, [selectedFriend, token, fetchVaultMessages]);
+  }, [selectedFriend, token, fetchMessages]);
 
   const handleSendMessage = async () => {
     if (message.trim()) {
@@ -224,7 +220,7 @@ function ChatUI({ selectedFriend, token }) {
         
         if (res.ok) {
           const data = await res.json();
-          // Add message to RAM-only state
+          // Add message to state (now has real DB id)
           setMessages(prev => [...prev, data.message_data]);
           setMessage("");
         } else {
@@ -246,18 +242,15 @@ function ChatUI({ selectedFriend, token }) {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          sender_id: msg.sender_id,
-          content: msg.content,
-          timestamp: msg.timestamp
+          message_id: msg.id  // Send message ID instead of message data
         })
       });
       
       if (res.ok) {
-        const data = await res.json();
         alert('Message saved to vault!');
         // Update message to show it's saved
         setMessages(prev => prev.map(m => 
-          m.id === msg.id ? { ...m, is_saved: true, id: data.message_id } : m
+          m.id === msg.id ? { ...m, is_saved: true } : m
         ));
       } else {
         const data = await res.json();
@@ -269,7 +262,7 @@ function ChatUI({ selectedFriend, token }) {
   };
 
   const handleDeleteMessage = (messageId) => {
-    // Just remove from RAM (ephemeral)
+    // Remove from state (will be cleaned up by server on logout)
     setMessages(prev => prev.filter(m => m.id !== messageId));
   };
 
@@ -582,8 +575,20 @@ function App() {
       });
   };
 
-  const handleLogout = () => {
-    setToken(null); // Messages automatically cleared from RAM
+  const handleLogout = async () => {
+    // Cleanup ephemeral messages before logout
+    try {
+      await fetch('http://localhost:8000/api/cleanup-messages/', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+    } catch (err) {
+      console.error('Cleanup error:', err);
+    }
+    setToken(null);
   };
 
   if (!token) {

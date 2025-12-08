@@ -2,7 +2,7 @@ from django.urls import path
 from .views import (
     SignupView, LoginView, SearchUsersView, AddFriendView, ListFriendsView, UserProfileView,
     SendFriendRequestView, ListPendingRequestsView, AcceptFriendRequestView, RejectFriendRequestView,
-    SendMessageView, GetMessagesView,
+    SendMessageView, GetMessagesView, CleanupEphemeralMessagesView,
     SaveMessageToVaultView, ListVaultMessagesView, DeleteFromVaultView
 )
 
@@ -18,9 +18,10 @@ urlpatterns = [
     path('accept-request/', AcceptFriendRequestView.as_view(), name='accept-request'),
     path('reject-request/', RejectFriendRequestView.as_view(), name='reject-request'),
     
-    # Messaging endpoints (RAM-only)
+    # Messaging endpoints (Hybrid: temporary server storage)
     path('send-message/', SendMessageView.as_view(), name='send-message'),
     path('get-messages/', GetMessagesView.as_view(), name='get-messages'),
+    path('cleanup-messages/', CleanupEphemeralMessagesView.as_view(), name='cleanup-messages'),
     
     # Vault endpoints
     path('save-to-vault/', SaveMessageToVaultView.as_view(), name='save-to-vault'),

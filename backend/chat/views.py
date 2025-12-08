@@ -229,7 +229,7 @@ class RejectFriendRequestView(generics.GenericAPIView):
 
 # ============ MESSAGING ENDPOINTS ============
 
-# Send a message to a friend (RAM-only, no DB storage)
+# Send a message to a friend (Hybrid: temporarily save to DB until delivered)
 class SendMessageView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
     
@@ -250,21 +250,29 @@ class SendMessageView(generics.GenericAPIView):
         if not Friend.objects.filter(user=request.user, friend=receiver).exists():
             return Response({'error': 'You can only message friends'}, status=status.HTTP_403_FORBIDDEN)
         
-        # Return message data without saving to DB (RAM-only)
+        # Save to DB temporarily (delivered=False by default)
+        message = Message.objects.create(
+            sender=request.user,
+            receiver=receiver,
+            content=content
+        )
+        
         return Response({
             'message': 'Message sent!',
             'message_data': {
-                'id': f'temp_{timezone.now().timestamp()}',  # Temporary ID for frontend
+                'id': message.id,
                 'sender_id': request.user.id,
                 'sender_username': request.user.username,
                 'receiver_id': receiver.id,
                 'content': content,
-                'timestamp': timezone.now().isoformat(),
+                'timestamp': message.timestamp.isoformat(),
+                'delivered': False,
                 'is_saved': False
             }
         }, status=status.HTTP_201_CREATED)
 
-# Get messages between current user and another user (only vault messages)
+# Get messages between current user and another user
+# Auto-marks messages as delivered when receiver opens chat
 class GetMessagesView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
     
@@ -279,12 +287,14 @@ class GetMessagesView(generics.GenericAPIView):
         except User.DoesNotExist:
             return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        # Only return vault messages (saved messages) between these two users
+        # Get all messages between these two users
         messages = Message.objects.filter(
-            Q(sender=request.user, receiver=other_user, saved_by=request.user) | 
-            Q(sender=other_user, receiver=request.user, saved_by=request.user),
-            is_saved=True
+            Q(sender=request.user, receiver=other_user) | 
+            Q(sender=other_user, receiver=request.user)
         ).order_by('timestamp')
+        
+        # Auto-mark messages as delivered when receiver opens the chat
+        messages.filter(receiver=request.user, delivered=False).update(delivered=True)
         
         results = []
         for msg in messages:
@@ -294,41 +304,35 @@ class GetMessagesView(generics.GenericAPIView):
                 'sender_username': msg.sender.username,
                 'receiver_id': msg.receiver.id,
                 'content': msg.content,
-                'timestamp': msg.timestamp,
-                'is_saved': True
+                'timestamp': msg.timestamp.isoformat(),
+                'delivered': msg.delivered,
+                'is_saved': msg.is_saved
             })
         
         return Response({'messages': results, 'count': len(results)})
 
 # ============ VAULT ENDPOINTS ============
 
-# Save a message to vault (Silent Save) - Creates new DB record
+# Save a message to vault (Silent Save) - Update existing message
 class SaveMessageToVaultView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
     
     def post(self, request):
-        # Frontend sends message data (not ID since it's not in DB yet)
-        sender_id = request.data.get('sender_id')
-        content = request.data.get('content')
-        timestamp_str = request.data.get('timestamp')
+        message_id = request.data.get('message_id')
         
-        if not sender_id or not content:
-            return Response({'error': 'sender_id and content are required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not message_id:
+            return Response({'error': 'message_id is required'}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
-            sender = User.objects.get(id=sender_id)
-        except User.DoesNotExist:
-            return Response({'error': 'Sender not found'}, status=status.HTTP_404_NOT_FOUND)
+            # Only the receiver can save messages
+            message = Message.objects.get(id=message_id, receiver=request.user)
+        except Message.DoesNotExist:
+            return Response({'error': 'Message not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        # Create new message in database (vault storage)
-        message = Message.objects.create(
-            sender=sender,
-            receiver=request.user,
-            content=content,
-            is_saved=True,
-            saved_by=request.user,
-            seen=True  # Already seen if saving it
-        )
+        # Mark as saved
+        message.is_saved = True
+        message.saved_by = request.user
+        message.save()
         
         return Response({
             'message': 'Message saved to vault',
@@ -373,3 +377,20 @@ class DeleteFromVaultView(generics.GenericAPIView):
         # Delete the message
         message.delete()
         return Response({'message': 'Message removed from vault'}, status=status.HTTP_200_OK)
+
+# Cleanup ephemeral messages (delivered + not saved)
+class CleanupEphemeralMessagesView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        # Delete all delivered messages that are not saved
+        deleted_count = Message.objects.filter(
+            receiver=request.user,
+            delivered=True,
+            is_saved=False
+        ).delete()[0]
+        
+        return Response({
+            'message': f'Deleted {deleted_count} ephemeral messages',
+            'count': deleted_count
+        }, status=status.HTTP_200_OK)
