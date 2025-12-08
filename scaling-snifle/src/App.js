@@ -558,6 +558,30 @@ function App() {
   const [showRequests, setShowRequests] = useState(false);
   const [showVault, setShowVault] = useState(false);
 
+  // Cleanup ephemeral messages function
+  const cleanupMessages = React.useCallback(() => {
+    if (token) {
+      fetch('http://localhost:8000/api/cleanup-messages/', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      }).catch(err => console.error('Cleanup error:', err));
+    }
+  }, [token]);
+
+  // Cleanup on window close/refresh
+  React.useEffect(() => {
+    const handleBeforeUnload = (e) => {
+      cleanupMessages();
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      cleanupMessages(); // Cleanup when component unmounts
+    };
+  }, [cleanupMessages]);
+
   React.useEffect(() => {
     if (token) {
       fetch('http://localhost:8000/api/list-friends/', {
@@ -590,13 +614,18 @@ function App() {
       });
   };
 
+  const handleLogout = () => {
+    cleanupMessages(); // Clean up messages before logging out
+    setToken(null);
+  };
+
   if (!token) {
     return <Auth onLogin={(t, u) => { setToken(t); setUsername(u); }} />;
   }
 
   return (
     <div>
-      <TopBar currentUser={username} onLogout={() => setToken(null)} onShowRequests={() => setShowRequests(true)} onShowVault={() => setShowVault(true)} />
+      <TopBar currentUser={username} onLogout={handleLogout} onShowRequests={() => setShowRequests(true)} onShowVault={() => setShowVault(true)} />
       <div style={{ display: 'flex' }}>
         <SideBar friends={friends} onSelectFriend={setSelectedFriend} token={token} onFriendsUpdated={() => {
           fetch('http://localhost:8000/api/list-friends/', {

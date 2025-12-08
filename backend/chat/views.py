@@ -411,3 +411,19 @@ class DeleteFromVaultView(generics.GenericAPIView):
         # Delete the message
         message.delete()
         return Response({'message': 'Message removed from vault'}, status=status.HTTP_200_OK)
+
+# Clean up ephemeral messages (delete all unsaved messages for current user)
+class CleanupEphemeralMessagesView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        # Delete all unsaved messages where current user is sender or receiver
+        deleted_count = Message.objects.filter(
+            Q(sender=request.user) | Q(receiver=request.user),
+            is_saved=False
+        ).delete()[0]
+        
+        return Response({
+            'message': 'Ephemeral messages cleaned up',
+            'deleted_count': deleted_count
+        }, status=status.HTTP_200_OK)
