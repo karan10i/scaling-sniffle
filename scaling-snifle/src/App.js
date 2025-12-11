@@ -242,16 +242,15 @@ function ChatUI({ selectedFriend, token }) {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          message_id: msg.id  // Send message ID instead of message data
+          sender_id: msg.sender_id,
+          content: msg.content
         })
       });
       
       if (res.ok) {
         alert('Message saved to vault!');
-        // Update message to show it's saved
-        setMessages(prev => prev.map(m => 
-          m.id === msg.id ? { ...m, is_saved: true } : m
-        ));
+        // Remove message from ephemeral list (it's moved to vault in Redis/Postgres)
+        setMessages(prev => prev.filter(m => m.id !== msg.id));
       } else {
         const data = await res.json();
         alert(data.error || 'Error saving message');
@@ -286,21 +285,27 @@ function ChatUI({ selectedFriend, token }) {
       }}>
         {messages.length > 0 ? (
           messages.map((msg) => (
-            <div key={msg.id} style={{
+            <div key={msg.id || `${msg.sender_id}-${msg.content}`} style={{
               marginBottom: '15px',
               padding: '10px',
               background: msg.sender_username === selectedFriend.username ? '#e3f2fd' : '#f1f8e9',
               borderRadius: '8px',
-              textAlign: msg.sender_username === selectedFriend.username ? 'left' : 'right'
+              textAlign: msg.sender_username === selectedFriend.username ? 'left' : 'right',
+              border: msg.source === 'vault' ? '2px solid #4caf50' : '1px solid #ccc',
+              opacity: msg.source === 'redis' ? 0.9 : 1
             }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div style={{ flex: 1 }}>
                   <strong>{msg.sender_username === selectedFriend.username ? selectedFriend.user_name : 'You'}</strong>
                   <p style={{ margin: '5px 0' }}>{msg.content}</p>
-                  <small style={{ color: '#666' }}>{new Date(msg.timestamp).toLocaleString()}</small>
+                  <small style={{ color: '#666' }}>
+                    {msg.timestamp ? new Date(msg.timestamp).toLocaleString() : 'Just now'}
+                    {msg.source === 'redis' && ' (Ephemeral)'}
+                    {msg.source === 'vault' && ' (Saved)'}
+                  </small>
                 </div>
                 <div style={{ display: 'flex', gap: '5px', marginLeft: '10px' }}>
-                  {msg.sender_username === selectedFriend.username && !msg.is_saved && (
+                  {msg.sender_username === selectedFriend.username && !msg.is_saved && msg.source === 'redis' && (
                     <button
                       onClick={() => handleSaveMessage(msg)}
                       style={{
@@ -317,7 +322,7 @@ function ChatUI({ selectedFriend, token }) {
                       📌 Save
                     </button>
                   )}
-                  {!msg.is_saved && (
+                  {msg.source === 'redis' && (
                     <button
                       onClick={() => handleDeleteMessage(msg.id)}
                       style={{
@@ -329,7 +334,7 @@ function ChatUI({ selectedFriend, token }) {
                         cursor: 'pointer',
                         fontSize: '12px'
                       }}
-                      title="Delete (RAM only)"
+                      title="Delete (will disappear after 10 seconds anyway)"
                     >
                       🗑️
                     </button>
@@ -575,19 +580,7 @@ function App() {
       });
   };
 
-  const handleLogout = async () => {
-    // Cleanup ephemeral messages before logout
-    try {
-      await fetch('http://localhost:8000/api/cleanup-messages/', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        }
-      });
-    } catch (err) {
-      console.error('Cleanup error:', err);
-    }
+  const handleLogout = () => {
     setToken(null);
   };
 
