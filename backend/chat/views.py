@@ -280,11 +280,12 @@ class GetMessagesView(generics.GenericAPIView):
         except User.DoesNotExist:
             return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        # 1. Get vault messages from Postgres (saved by current user, sent by other_user)
-        vault_messages = Message.objects.filter(
+        # 1. Get saved messages from Postgres (only if current user is the receiver)
+        # These are messages the current user saved - ONLY visible to receiver
+        saved_messages = Message.objects.filter(
             saved_by=request.user, is_saved=True, sender=other_user
         ).order_by('timestamp')
-        vault_results = [{
+        saved_results = [{
             'id': msg.id,
             'sender_id': msg.sender.id,
             'sender_username': msg.sender.username,
@@ -293,7 +294,7 @@ class GetMessagesView(generics.GenericAPIView):
             'timestamp': msg.timestamp.isoformat(),
             'is_saved': True,
             'source': 'vault'
-        } for msg in vault_messages]
+        } for msg in saved_messages]
 
         # 2. Get ephemeral messages from Redis (from other_user to current user)
         temp_messages = get_temp_messages(other_user.id, request.user.id)
@@ -308,8 +309,8 @@ class GetMessagesView(generics.GenericAPIView):
             'source': 'redis'
         } for m in temp_messages]
 
-        # Combine and return
-        all_messages = vault_results + temp_results
+        # Combine and return - both saved and ephemeral messages
+        all_messages = saved_results + temp_results
         return Response({'messages': all_messages, 'count': len(all_messages)})
 
 # ============ VAULT ENDPOINTS ============
