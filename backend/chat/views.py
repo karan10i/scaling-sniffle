@@ -9,7 +9,7 @@ from .models import Profile, Message
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 from django.db.models import Q
-from .redis_util import save_temp_message, get_temp_messages, remove_temp_message
+from .redis_util import save_temp_message, get_temp_messages, remove_temp_message, cleanup_all_temp_messages
 
 class SignupView(generics.GenericAPIView):
     def post(self, request):
@@ -385,4 +385,25 @@ class DeleteFromVaultView(generics.GenericAPIView):
         # Delete the message
         message.delete()
         return Response({'message': 'Message removed from vault'}, status=status.HTTP_200_OK)
+
+# Cleanup ephemeral messages on tab switch
+class CleanupEphemeralView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        """
+        Cleanup all ephemeral messages between current user and a specific friend.
+        Called when user switches to a different chat tab.
+        
+        Required: friend_id (the friend being switched away from)
+        """
+        friend_id = request.data.get('friend_id')
+        
+        if not friend_id:
+            return Response({'error': 'friend_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Cleanup messages sent by friend to current user
+        cleanup_all_temp_messages(friend_id, request.user.id)
+        
+        return Response({'message': 'Ephemeral messages cleaned up'}, status=status.HTTP_200_OK)
 

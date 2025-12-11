@@ -12,14 +12,14 @@ def save_temp_message(sender_id, receiver_id, content, ttl=604800):
     redis_client.rpush(key, json.dumps(message))
     redis_client.expire(key, ttl)  # Set 7-day TTL by default
 
-def get_temp_messages(sender_id, receiver_id, expire_after_read=True, expire_seconds=10):
+def get_temp_messages(sender_id, receiver_id):
+    """Fetch messages from Redis WITHOUT deleting them. Messages persist until manually removed or TTL expires."""
     key = f"chat:{sender_id}:{receiver_id}"
     messages = [json.loads(m) for m in redis_client.lrange(key, 0, -1)]
-    if expire_after_read:
-        redis_client.expire(key, expire_seconds)  
     return messages
 
 def remove_temp_message(sender_id, receiver_id, content):
+    """Remove a specific message from Redis (when saved to vault)"""
     key = f"chat:{sender_id}:{receiver_id}"
     messages = redis_client.lrange(key, 0, -1)
     for msg in messages:
@@ -27,3 +27,8 @@ def remove_temp_message(sender_id, receiver_id, content):
         if msg_obj["content"] == content:
             redis_client.lrem(key, 1, msg)
             break
+
+def cleanup_all_temp_messages(sender_id, receiver_id):
+    """Delete ALL ephemeral messages (called on tab switch or logout)"""
+    key = f"chat:{sender_id}:{receiver_id}"
+    redis_client.delete(key)
