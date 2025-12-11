@@ -38,9 +38,9 @@ class Message(models.Model):
     timestamp = models.DateTimeField(auto_now_add=True)
     
     # Vault tracking (Silent Save)
-    # Messages only stored in Postgres if explicitly saved to vault
-    is_saved = models.BooleanField(default=True)  # Always True for vault messages
-    saved_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='saved_messages', null=True, blank=True)  # Who saved it
+    # Each user can independently save a message
+    saved_by_sender = models.BooleanField(default=False)  # Sender saved it
+    saved_by_receiver = models.BooleanField(default=False)  # Receiver saved it
 
     def __str__(self):
         return f"From {self.sender.username} to {self.receiver.username} at {self.timestamp}"

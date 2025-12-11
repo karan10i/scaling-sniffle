@@ -232,6 +232,9 @@ function ChatUI({ selectedFriend, token }) {
 
   const handleSaveMessage = async (msg) => {
     try {
+      // Determine if current user is sender or receiver
+      const isSender = msg.sender_username === username;
+      
       const res = await fetch('http://localhost:8000/api/save-to-vault/', {
         method: 'POST',
         headers: {
@@ -239,8 +242,9 @@ function ChatUI({ selectedFriend, token }) {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          sender_id: msg.sender_id,
-          content: msg.content
+          other_user_id: selectedFriend.id,
+          content: msg.content,
+          is_sender: isSender
         })
       });
       
@@ -302,7 +306,7 @@ function ChatUI({ selectedFriend, token }) {
                   </small>
                 </div>
                 <div style={{ display: 'flex', gap: '5px', marginLeft: '10px' }}>
-                  {msg.sender_username === selectedFriend.username && !msg.is_saved && msg.source === 'redis' && (
+                  {!msg.is_saved && msg.source === 'redis' && (
                     <button
                       onClick={() => handleSaveMessage(msg)}
                       style={{
@@ -314,7 +318,7 @@ function ChatUI({ selectedFriend, token }) {
                         cursor: 'pointer',
                         fontSize: '12px'
                       }}
-                      title="Save to vault (sender won't know)"
+                      title="Save to vault (other user won't know)"
                     >
                       📌 Save
                     </button>

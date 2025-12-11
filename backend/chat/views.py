@@ -8,6 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 from .models import Profile, Message
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
+from django.db import models
 from django.db.models import Q
 from .redis_util import save_temp_message, get_temp_messages, remove_temp_message, cleanup_all_temp_messages
 
@@ -280,11 +281,13 @@ class GetMessagesView(generics.GenericAPIView):
         except User.DoesNotExist:
             return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        # 1. Get saved messages from Postgres (only if current user is the receiver)
-        # These are messages the current user saved - ONLY visible to receiver
+        # 1. Get saved messages from Postgres where current user is either sender or receiver
+        # Messages where current user saved them
         saved_messages = Message.objects.filter(
-            saved_by=request.user, is_saved=True, sender=other_user
+            models.Q(sender=request.user, receiver=other_user, saved_by_sender=True) |
+            models.Q(sender=other_user, receiver=request.user, saved_by_receiver=True)
         ).order_by('timestamp')
+        
         saved_results = [{
             'id': msg.id,
             'sender_id': msg.sender.id,
@@ -296,52 +299,108 @@ class GetMessagesView(generics.GenericAPIView):
             'source': 'vault'
         } for msg in saved_messages]
 
-        # 2. Get ephemeral messages from Redis (from other_user to current user)
-        temp_messages = get_temp_messages(other_user.id, request.user.id)
-        temp_results = [{
+        # 2. Get ephemeral messages from Redis
+        # Messages sent BY other_user TO current_user (receiver gets these)
+        temp_messages_received = get_temp_messages(other_user.id, request.user.id)
+        temp_results_received = [{
             'id': None,
-            'sender_id': m['sender_id'],
+            'sender_id': other_user.id,
             'sender_username': other_user.username,
-            'receiver_id': m['receiver_id'],
+            'receiver_id': request.user.id,
             'content': m['content'],
             'timestamp': None,
             'is_saved': False,
             'source': 'redis'
-        } for m in temp_messages]
+        } for m in temp_messages_received]
+        
+        # Messages sent BY current_user TO other_user (sender gets these back from Redis for their own sent messages)
+        temp_messages_sent = get_temp_messages(request.user.id, other_user.id)
+        temp_results_sent = [{
+            'id': None,
+            'sender_id': request.user.id,
+            'sender_username': request.user.username,
+            'receiver_id': other_user.id,
+            'content': m['content'],
+            'timestamp': None,
+            'is_saved': False,
+            'source': 'redis'
+        } for m in temp_messages_sent]
 
-        # Combine and return - both saved and ephemeral messages
-        all_messages = saved_results + temp_results
+        # Combine and return - saved messages + received ephemeral + sent ephemeral
+        all_messages = saved_results + temp_results_received + temp_results_sent
         return Response({'messages': all_messages, 'count': len(all_messages)})
 
 # ============ VAULT ENDPOINTS ============
 
-# Save a message to vault (Silent Save) - Creates new message in Postgres and removes from Redis
+# Save a message to vault (Silent Save) - Can be called by sender or receiver
 class SaveMessageToVaultView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
     
     def post(self, request):
-        sender_id = request.data.get('sender_id')
-        content = request.data.get('content')
+        """
+        Save a message to vault. Can be called by either sender or receiver.
         
-        if not sender_id or not content:
-            return Response({'error': 'sender_id and content are required'}, status=status.HTTP_400_BAD_REQUEST)
+        Required fields:
+        - other_user_id: The ID of the other user in the conversation
+        - content: The message content to save
+        - is_sender: Boolean indicating if current user is the sender
+        """
+        other_user_id = request.data.get('other_user_id')
+        content = request.data.get('content')
+        is_sender = request.data.get('is_sender', False)  # True if current user is sender
+        
+        if not other_user_id or not content:
+            return Response({'error': 'other_user_id and content are required'}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
-            sender = User.objects.get(id=sender_id)
+            other_user = User.objects.get(id=other_user_id)
         except User.DoesNotExist:
-            return Response({'error': 'Sender not found'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        # Save to vault (Postgres)
-        message = Message.objects.create(
+        # Determine sender and receiver
+        if is_sender:
+            # Current user is the sender
+            sender = request.user
+            receiver = other_user
+            saved_by_sender = True
+            saved_by_receiver = False
+        else:
+            # Current user is the receiver
+            sender = other_user
+            receiver = request.user
+            saved_by_sender = False
+            saved_by_receiver = True
+        
+        # Check if message already exists (both users saving the same message)
+        existing_msg = Message.objects.filter(
             sender=sender,
-            receiver=request.user,
-            content=content,
-            is_saved=True,
-            saved_by=request.user
-        )
+            receiver=receiver,
+            content=content
+        ).first()
         
-        # Remove from Redis
-        remove_temp_message(sender_id, request.user.id, content)
+        if existing_msg:
+            # Message already in vault, just update the save flags
+            if is_sender:
+                existing_msg.saved_by_sender = True
+            else:
+                existing_msg.saved_by_receiver = True
+            existing_msg.save()
+            message = existing_msg
+        else:
+            # Create new message in vault
+            message = Message.objects.create(
+                sender=sender,
+                receiver=receiver,
+                content=content,
+                saved_by_sender=saved_by_sender,
+                saved_by_receiver=saved_by_receiver
+            )
+        
+        # Remove from Redis (the sender's ephemeral messages)
+        if is_sender:
+            remove_temp_message(request.user.id, other_user_id, content)
+        else:
+            remove_temp_message(other_user_id, request.user.id, content)
         
         return Response({
             'message': 'Message saved to vault',
@@ -352,8 +411,11 @@ class ListVaultMessagesView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
-        # Get all messages saved by current user
-        messages = Message.objects.filter(saved_by=request.user, is_saved=True).order_by('-timestamp')
+        # Get all messages saved by current user (either as sender or receiver)
+        messages = Message.objects.filter(
+            models.Q(sender=request.user, saved_by_sender=True) |
+            models.Q(receiver=request.user, saved_by_receiver=True)
+        ).order_by('-timestamp')
         
         results = []
         for msg in messages:
@@ -361,6 +423,7 @@ class ListVaultMessagesView(generics.GenericAPIView):
                 'id': msg.id,
                 'sender_id': msg.sender.id,
                 'sender_username': msg.sender.username,
+                'receiver_id': msg.receiver.id,
                 'content': msg.content,
                 'timestamp': msg.timestamp,
             })
@@ -378,12 +441,24 @@ class DeleteFromVaultView(generics.GenericAPIView):
             return Response({'error': 'message_id is required'}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
-            message = Message.objects.get(id=message_id, saved_by=request.user, is_saved=True)
+            message = Message.objects.get(id=message_id)
         except Message.DoesNotExist:
-            return Response({'error': 'Message not found in vault'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': 'Message not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        # Delete the message
-        message.delete()
+        # Check if current user has saved this message
+        if message.sender == request.user and message.saved_by_sender:
+            message.saved_by_sender = False
+        elif message.receiver == request.user and message.saved_by_receiver:
+            message.saved_by_receiver = False
+        else:
+            return Response({'error': 'Message not saved by you'}, status=status.HTTP_403_FORBIDDEN)
+        
+        # If neither user saved it anymore, delete the message from Postgres
+        if not message.saved_by_sender and not message.saved_by_receiver:
+            message.delete()
+        else:
+            message.save()
+        
         return Response({'message': 'Message removed from vault'}, status=status.HTTP_200_OK)
 
 # Cleanup ephemeral messages on tab switch
