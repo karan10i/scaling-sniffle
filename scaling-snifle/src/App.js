@@ -459,23 +459,24 @@ function App() {
   }, [token]);
 
   // Cleanup ephemeral messages when switching chats
-  React.useEffect(() => {
-    const previousFriendRef = { id: null };
-    previousFriendRef.id = selectedFriend?.id;
+  const previousFriendRef = React.useRef(null);
 
-    return () => {
-      // On unmount or cleanup, if we're switching away from a friend, cleanup their ephemeral messages
-      if (previousFriendRef.id) {
-        fetch('http://localhost:8000/api/cleanup-ephemeral/', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ friend_id: previousFriendRef.id })
-        }).catch(err => console.error('Cleanup error:', err));
-      }
-    };
+  React.useEffect(() => {
+    // If we have a token and the selected friend changed from previous
+    if (token && previousFriendRef.current && previousFriendRef.current.id !== selectedFriend?.id) {
+      // Cleanup the previous friend's ephemeral messages
+      fetch('http://localhost:8000/api/cleanup-ephemeral/', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ friend_id: previousFriendRef.current.id })
+      }).catch(err => console.error('Cleanup error:', err));
+    }
+    
+    // Update the ref to current friend
+    previousFriendRef.current = selectedFriend;
   }, [selectedFriend, token]);
 
   const handleAcceptRequest = (requestId) => {
@@ -501,7 +502,7 @@ function App() {
 
   const handleLogout = () => {
     // Cleanup ephemeral messages for the last selected friend before logging out
-    if (selectedFriend) {
+    if (selectedFriend && token) {
       fetch('http://localhost:8000/api/cleanup-ephemeral/', {
         method: 'POST',
         headers: {
