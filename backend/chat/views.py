@@ -8,7 +8,9 @@ from rest_framework.permissions import IsAuthenticated
 from .models import Profile, Message
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
+from django.db import models
 from django.db.models import Q
+from .redis_util import save_temp_message, get_temp_messages, remove_temp_message, cleanup_all_temp_messages
 
 class SignupView(generics.GenericAPIView):
     def post(self, request):
@@ -229,7 +231,7 @@ class RejectFriendRequestView(generics.GenericAPIView):
 
 # ============ MESSAGING ENDPOINTS ============
 
-# Send a message to a friend (RAM-only, no DB storage)
+# Send a message to a friend (Ephemeral: stored in Redis, deleted after being seen)
 class SendMessageView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
     
@@ -250,27 +252,27 @@ class SendMessageView(generics.GenericAPIView):
         if not Friend.objects.filter(user=request.user, friend=receiver).exists():
             return Response({'error': 'You can only message friends'}, status=status.HTTP_403_FORBIDDEN)
         
-        # Return message data without saving to DB (RAM-only)
+        # Save to Redis (not DB)
+        save_temp_message(request.user.id, receiver.id, content)
+        
         return Response({
             'message': 'Message sent!',
             'message_data': {
-                'id': f'temp_{timezone.now().timestamp()}',  # Temporary ID for frontend
                 'sender_id': request.user.id,
                 'sender_username': request.user.username,
                 'receiver_id': receiver.id,
                 'content': content,
-                'timestamp': timezone.now().isoformat(),
-                'is_saved': False
             }
         }, status=status.HTTP_201_CREATED)
 
-# Get messages between current user and another user (only vault messages)
+# Get messages between current user and another user
+# Returns vault messages (Postgres) + ephemeral messages (Redis)
+# Ephemeral messages are auto-expired 10 seconds after being read
 class GetMessagesView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
         other_user_id = request.query_params.get('user_id')
-        
         if not other_user_id:
             return Response({'error': 'user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
         
@@ -279,12 +281,141 @@ class GetMessagesView(generics.GenericAPIView):
         except User.DoesNotExist:
             return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        # Only return vault messages (saved messages) between these two users
-        messages = Message.objects.filter(
-            Q(sender=request.user, receiver=other_user, saved_by=request.user) | 
-            Q(sender=other_user, receiver=request.user, saved_by=request.user),
-            is_saved=True
+        # 1. Get saved messages from Postgres where current user is either sender or receiver
+        # Messages where current user saved them
+        saved_messages = Message.objects.filter(
+            models.Q(sender=request.user, receiver=other_user, saved_by_sender=True) |
+            models.Q(sender=other_user, receiver=request.user, saved_by_receiver=True)
         ).order_by('timestamp')
+        
+        saved_results = [{
+            'id': msg.id,
+            'sender_id': msg.sender.id,
+            'sender_username': msg.sender.username,
+            'receiver_id': msg.receiver.id,
+            'content': msg.content,
+            'timestamp': msg.timestamp.isoformat(),
+            'is_saved': True,
+            'source': 'vault'
+        } for msg in saved_messages]
+
+        # 2. Get ephemeral messages from Redis
+        # Messages sent BY other_user TO current_user (receiver gets these)
+        temp_messages_received = get_temp_messages(other_user.id, request.user.id)
+        temp_results_received = [{
+            'id': None,
+            'sender_id': other_user.id,
+            'sender_username': other_user.username,
+            'receiver_id': request.user.id,
+            'content': m['content'],
+            'timestamp': None,
+            'is_saved': False,
+            'source': 'redis'
+        } for m in temp_messages_received]
+        
+        # Messages sent BY current_user TO other_user (sender gets these back from Redis for their own sent messages)
+        temp_messages_sent = get_temp_messages(request.user.id, other_user.id)
+        temp_results_sent = [{
+            'id': None,
+            'sender_id': request.user.id,
+            'sender_username': request.user.username,
+            'receiver_id': other_user.id,
+            'content': m['content'],
+            'timestamp': None,
+            'is_saved': False,
+            'source': 'redis'
+        } for m in temp_messages_sent]
+
+        # Combine and return - saved messages + received ephemeral + sent ephemeral
+        all_messages = saved_results + temp_results_received + temp_results_sent
+        return Response({'messages': all_messages, 'count': len(all_messages)})
+
+# ============ VAULT ENDPOINTS ============
+
+# Save a message to vault (Silent Save) - Can be called by sender or receiver
+class SaveMessageToVaultView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        """
+        Save a message to vault. Can be called by either sender or receiver.
+        
+        Required fields:
+        - other_user_id: The ID of the other user in the conversation
+        - content: The message content to save
+        - is_sender: Boolean indicating if current user is the sender
+        """
+        other_user_id = request.data.get('other_user_id')
+        content = request.data.get('content')
+        is_sender = request.data.get('is_sender', False)  # True if current user is sender
+        
+        if not other_user_id or not content:
+            return Response({'error': 'other_user_id and content are required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            other_user = User.objects.get(id=other_user_id)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Determine sender and receiver
+        if is_sender:
+            # Current user is the sender
+            sender = request.user
+            receiver = other_user
+            saved_by_sender = True
+            saved_by_receiver = False
+        else:
+            # Current user is the receiver
+            sender = other_user
+            receiver = request.user
+            saved_by_sender = False
+            saved_by_receiver = True
+        
+        # Check if message already exists (both users saving the same message)
+        existing_msg = Message.objects.filter(
+            sender=sender,
+            receiver=receiver,
+            content=content
+        ).first()
+        
+        if existing_msg:
+            # Message already in vault, just update the save flags
+            if is_sender:
+                existing_msg.saved_by_sender = True
+            else:
+                existing_msg.saved_by_receiver = True
+            existing_msg.save()
+            message = existing_msg
+        else:
+            # Create new message in vault
+            message = Message.objects.create(
+                sender=sender,
+                receiver=receiver,
+                content=content,
+                saved_by_sender=saved_by_sender,
+                saved_by_receiver=saved_by_receiver
+            )
+        
+        # Remove from Redis (the sender's ephemeral messages)
+        if is_sender:
+            remove_temp_message(request.user.id, other_user_id, content)
+        else:
+            remove_temp_message(other_user_id, request.user.id, content)
+        
+        return Response({
+            'message': 'Message saved to vault',
+            'message_id': message.id
+        }, status=status.HTTP_201_CREATED)
+# List all saved messages (Vault)
+class ListVaultMessagesView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        # Get all messages saved by current user (either as sender or receiver)
+        messages = Message.objects.filter(
+            models.Q(sender=request.user, saved_by_sender=True) |
+            models.Q(receiver=request.user, saved_by_receiver=True)
+        ).order_by('-timestamp')
         
         results = []
         for msg in messages:
@@ -293,62 +424,6 @@ class GetMessagesView(generics.GenericAPIView):
                 'sender_id': msg.sender.id,
                 'sender_username': msg.sender.username,
                 'receiver_id': msg.receiver.id,
-                'content': msg.content,
-                'timestamp': msg.timestamp,
-                'is_saved': True
-            })
-        
-        return Response({'messages': results, 'count': len(results)})
-
-# ============ VAULT ENDPOINTS ============
-
-# Save a message to vault (Silent Save) - Creates new DB record
-class SaveMessageToVaultView(generics.GenericAPIView):
-    permission_classes = [IsAuthenticated]
-    
-    def post(self, request):
-        # Frontend sends message data (not ID since it's not in DB yet)
-        sender_id = request.data.get('sender_id')
-        content = request.data.get('content')
-        timestamp_str = request.data.get('timestamp')
-        
-        if not sender_id or not content:
-            return Response({'error': 'sender_id and content are required'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        try:
-            sender = User.objects.get(id=sender_id)
-        except User.DoesNotExist:
-            return Response({'error': 'Sender not found'}, status=status.HTTP_404_NOT_FOUND)
-        
-        # Create new message in database (vault storage)
-        message = Message.objects.create(
-            sender=sender,
-            receiver=request.user,
-            content=content,
-            is_saved=True,
-            saved_by=request.user,
-            seen=True  # Already seen if saving it
-        )
-        
-        return Response({
-            'message': 'Message saved to vault',
-            'message_id': message.id
-        }, status=status.HTTP_200_OK)
-
-# List all saved messages (Vault)
-class ListVaultMessagesView(generics.GenericAPIView):
-    permission_classes = [IsAuthenticated]
-    
-    def get(self, request):
-        # Get all messages saved by current user
-        messages = Message.objects.filter(saved_by=request.user, is_saved=True).order_by('-timestamp')
-        
-        results = []
-        for msg in messages:
-            results.append({
-                'id': msg.id,
-                'sender_id': msg.sender.id,
-                'sender_username': msg.sender.username,
                 'content': msg.content,
                 'timestamp': msg.timestamp,
             })
@@ -366,10 +441,44 @@ class DeleteFromVaultView(generics.GenericAPIView):
             return Response({'error': 'message_id is required'}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
-            message = Message.objects.get(id=message_id, saved_by=request.user, is_saved=True)
+            message = Message.objects.get(id=message_id)
         except Message.DoesNotExist:
-            return Response({'error': 'Message not found in vault'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': 'Message not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        # Delete the message
-        message.delete()
+        # Check if current user has saved this message
+        if message.sender == request.user and message.saved_by_sender:
+            message.saved_by_sender = False
+        elif message.receiver == request.user and message.saved_by_receiver:
+            message.saved_by_receiver = False
+        else:
+            return Response({'error': 'Message not saved by you'}, status=status.HTTP_403_FORBIDDEN)
+        
+        # If neither user saved it anymore, delete the message from Postgres
+        if not message.saved_by_sender and not message.saved_by_receiver:
+            message.delete()
+        else:
+            message.save()
+        
         return Response({'message': 'Message removed from vault'}, status=status.HTTP_200_OK)
+
+# Cleanup ephemeral messages on tab switch
+class CleanupEphemeralView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        """
+        Cleanup all ephemeral messages between current user and a specific friend.
+        Called when user switches to a different chat tab.
+        
+        Required: friend_id (the friend being switched away from)
+        """
+        friend_id = request.data.get('friend_id')
+        
+        if not friend_id:
+            return Response({'error': 'friend_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Cleanup messages sent by friend to current user
+        cleanup_all_temp_messages(friend_id, request.user.id)
+        
+        return Response({'message': 'Ephemeral messages cleaned up'}, status=status.HTTP_200_OK)
+

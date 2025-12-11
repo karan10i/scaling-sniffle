@@ -36,9 +36,11 @@ class Message(models.Model):
     receiver = models.ForeignKey(User, on_delete=models.CASCADE, related_name='received_messages')
     content = models.TextField()
     timestamp = models.DateTimeField(auto_now_add=True)
-    seen = models.BooleanField(default=False)  # True when receiver views the message
-    is_saved = models.BooleanField(default=False)  # True if receiver saves to vault
-    saved_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='saved_messages', null=True, blank=True)  # Who saved it
+    
+    # Vault tracking (Silent Save)
+    # Each user can independently save a message
+    saved_by_sender = models.BooleanField(default=False)  # Sender saved it
+    saved_by_receiver = models.BooleanField(default=False)  # Receiver saved it
 
     def __str__(self):
         return f"From {self.sender.username} to {self.receiver.username} at {self.timestamp}"

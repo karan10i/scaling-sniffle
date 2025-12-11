@@ -3,7 +3,7 @@ from .views import (
     SignupView, LoginView, SearchUsersView, AddFriendView, ListFriendsView, UserProfileView,
     SendFriendRequestView, ListPendingRequestsView, AcceptFriendRequestView, RejectFriendRequestView,
     SendMessageView, GetMessagesView,
-    SaveMessageToVaultView, ListVaultMessagesView, DeleteFromVaultView
+    SaveMessageToVaultView, ListVaultMessagesView, DeleteFromVaultView, CleanupEphemeralView
 )
 
 urlpatterns = [
@@ -18,7 +18,7 @@ urlpatterns = [
     path('accept-request/', AcceptFriendRequestView.as_view(), name='accept-request'),
     path('reject-request/', RejectFriendRequestView.as_view(), name='reject-request'),
     
-    # Messaging endpoints (RAM-only)
+    # Messaging endpoints (Redis: ephemeral messages)
     path('send-message/', SendMessageView.as_view(), name='send-message'),
     path('get-messages/', GetMessagesView.as_view(), name='get-messages'),
     
@@ -26,4 +26,7 @@ urlpatterns = [
     path('save-to-vault/', SaveMessageToVaultView.as_view(), name='save-to-vault'),
     path('list-vault/', ListVaultMessagesView.as_view(), name='list-vault'),
     path('delete-from-vault/', DeleteFromVaultView.as_view(), name='delete-from-vault'),
+    
+    # Cleanup endpoints
+    path('cleanup-ephemeral/', CleanupEphemeralView.as_view(), name='cleanup-ephemeral'),
 ]

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import Auth from './components/Auth';
 import './App.css';
 
-function TopBar({ currentUser, onLogout, onShowRequests, onShowVault }) {
+function TopBar({ currentUser, onLogout, onShowRequests }) {
   return (
     <div style={{
       display: 'flex',
@@ -18,9 +18,6 @@ function TopBar({ currentUser, onLogout, onShowRequests, onShowVault }) {
       <div style={{ display: 'flex', gap: '10px' }}>
         <button onClick={onShowRequests} style={{ padding: '8px 12px', cursor: 'pointer' }}>
           Friend Requests
-        </button>
-        <button onClick={onShowVault} style={{ padding: '8px 12px', cursor: 'pointer', background: '#4caf50', color: 'white', border: 'none', borderRadius: '4px' }}>
-          📌 Vault
         </button>
         <button onClick={onLogout} style={{ padding: '8px 12px', cursor: 'pointer' }}>
           Logout
@@ -180,32 +177,28 @@ function SideBar({ friends, onSelectFriend, token, onFriendsUpdated }) {
 
 function ChatUI({ selectedFriend, token }) {
   const [message, setMessage] = useState("");
-  const [messages, setMessages] = useState([]); // RAM-only storage
+  const [messages, setMessages] = useState([]); // Server-stored messages
 
-  const fetchVaultMessages = React.useCallback(() => {
+  const fetchMessages = React.useCallback(() => {
     if (selectedFriend && token) {
       fetch(`http://localhost:8000/api/get-messages/?user_id=${selectedFriend.id}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       })
         .then(res => res.json())
         .then(data => {
-          // Load vault messages into RAM
-          const vaultMessages = (data.messages || []).map(msg => ({
-            ...msg,
-            is_saved: true
-          }));
-          setMessages(vaultMessages);
+          // Load all messages from server (including undelivered and vault)
+          setMessages(data.messages || []);
         })
         .catch(err => console.error(err));
     }
   }, [selectedFriend, token]);
 
-  // Load vault messages when friend is selected
+  // Load messages when friend is selected
   React.useEffect(() => {
     if (selectedFriend && token) {
-      fetchVaultMessages();
+      fetchMessages();
     }
-  }, [selectedFriend, token, fetchVaultMessages]);
+  }, [selectedFriend, token, fetchMessages]);
 
   const handleSendMessage = async () => {
     if (message.trim()) {
@@ -224,7 +217,7 @@ function ChatUI({ selectedFriend, token }) {
         
         if (res.ok) {
           const data = await res.json();
-          // Add message to RAM-only state
+          // Add message to state (now has real DB id)
           setMessages(prev => [...prev, data.message_data]);
           setMessage("");
         } else {
@@ -239,6 +232,9 @@ function ChatUI({ selectedFriend, token }) {
 
   const handleSaveMessage = async (msg) => {
     try {
+      // Determine if current user is sender or receiver
+      const isSender = msg.sender_username === username;
+      
       const res = await fetch('http://localhost:8000/api/save-to-vault/', {
         method: 'POST',
         headers: {
@@ -246,22 +242,19 @@ function ChatUI({ selectedFriend, token }) {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          sender_id: msg.sender_id,
+          other_user_id: selectedFriend.id,
           content: msg.content,
-          timestamp: msg.timestamp
+          is_sender: isSender
         })
       });
       
       if (res.ok) {
-        const data = await res.json();
-        alert('Message saved to vault!');
-        // Update message to show it's saved
+        // Update message to show it's saved without refresh
         setMessages(prev => prev.map(m => 
-          m.id === msg.id ? { ...m, is_saved: true, id: data.message_id } : m
+          m.content === msg.content && m.sender_id === msg.sender_id
+            ? { ...m, is_saved: true, source: 'vault' }
+            : m
         ));
-      } else {
-        const data = await res.json();
-        alert(data.error || 'Error saving message');
       }
     } catch (err) {
       console.error('Save message error:', err);
@@ -269,7 +262,7 @@ function ChatUI({ selectedFriend, token }) {
   };
 
   const handleDeleteMessage = (messageId) => {
-    // Just remove from RAM (ephemeral)
+    // Remove from state (will be cleaned up by server on logout)
     setMessages(prev => prev.filter(m => m.id !== messageId));
   };
 
@@ -293,21 +286,27 @@ function ChatUI({ selectedFriend, token }) {
       }}>
         {messages.length > 0 ? (
           messages.map((msg) => (
-            <div key={msg.id} style={{
+            <div key={msg.id || `${msg.sender_id}-${msg.content}`} style={{
               marginBottom: '15px',
               padding: '10px',
               background: msg.sender_username === selectedFriend.username ? '#e3f2fd' : '#f1f8e9',
               borderRadius: '8px',
-              textAlign: msg.sender_username === selectedFriend.username ? 'left' : 'right'
+              textAlign: msg.sender_username === selectedFriend.username ? 'left' : 'right',
+              border: msg.source === 'vault' ? '2px solid #4caf50' : '1px solid #ccc',
+              opacity: msg.source === 'redis' ? 0.9 : 1
             }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div style={{ flex: 1 }}>
                   <strong>{msg.sender_username === selectedFriend.username ? selectedFriend.user_name : 'You'}</strong>
                   <p style={{ margin: '5px 0' }}>{msg.content}</p>
-                  <small style={{ color: '#666' }}>{new Date(msg.timestamp).toLocaleString()}</small>
+                  <small style={{ color: '#666' }}>
+                    {msg.timestamp ? new Date(msg.timestamp).toLocaleString() : 'Just now'}
+                    {msg.source === 'redis' && ' (Ephemeral)'}
+                    {msg.source === 'vault' && ' (Saved)'}
+                  </small>
                 </div>
                 <div style={{ display: 'flex', gap: '5px', marginLeft: '10px' }}>
-                  {msg.sender_username === selectedFriend.username && !msg.is_saved && (
+                  {!msg.is_saved && msg.source === 'redis' && (
                     <button
                       onClick={() => handleSaveMessage(msg)}
                       style={{
@@ -319,12 +318,12 @@ function ChatUI({ selectedFriend, token }) {
                         cursor: 'pointer',
                         fontSize: '12px'
                       }}
-                      title="Save to vault (sender won't know)"
+                      title="Save to vault (other user won't know)"
                     >
                       📌 Save
                     </button>
                   )}
-                  {!msg.is_saved && (
+                  {msg.source === 'redis' && (
                     <button
                       onClick={() => handleDeleteMessage(msg.id)}
                       style={{
@@ -336,7 +335,7 @@ function ChatUI({ selectedFriend, token }) {
                         cursor: 'pointer',
                         fontSize: '12px'
                       }}
-                      title="Delete (RAM only)"
+                      title="Delete (will disappear after 10 seconds anyway)"
                     >
                       🗑️
                     </button>
@@ -445,110 +444,12 @@ function FriendRequests({ token, onClose, onAccept }) {
   );
 }
 
-function Vault({ token, onClose }) {
-  const [vaultMessages, setVaultMessages] = React.useState([]);
-
-  const fetchVaultMessages = React.useCallback(() => {
-    if (token) {
-      fetch('http://localhost:8000/api/list-vault/', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      })
-        .then(res => res.json())
-        .then(data => setVaultMessages(data.messages || []))
-        .catch(err => console.error(err));
-    }
-  }, [token]);
-
-  React.useEffect(() => {
-    fetchVaultMessages();
-  }, [fetchVaultMessages]);
-
-  const handleDeleteFromVault = async (messageId) => {
-    try {
-      const res = await fetch('http://localhost:8000/api/delete-from-vault/', {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ message_id: messageId })
-      });
-      if (res.ok) {
-        fetchVaultMessages();
-      }
-    } catch (err) {
-      console.error('Delete from vault error:', err);
-    }
-  };
-
-  return (
-    <div style={{
-      position: 'fixed',
-      top: '50%',
-      left: '50%',
-      transform: 'translate(-50%, -50%)',
-      background: 'white',
-      padding: '20px',
-      borderRadius: '8px',
-      boxShadow: '0 4px 6px rgba(0,0,0,0.1)',
-      zIndex: 1000,
-      maxWidth: '500px',
-      maxHeight: '70vh',
-      overflowY: 'auto'
-    }}>
-      <h3>📌 Your Vault (Saved Messages)</h3>
-      <p style={{ fontSize: '14px', color: '#666', marginBottom: '15px' }}>
-        These messages are saved privately. The sender doesn't know you saved them.
-      </p>
-      {vaultMessages.length > 0 ? (
-        vaultMessages.map((msg) => (
-          <div key={msg.id} style={{ 
-            padding: '10px', 
-            marginBottom: '10px', 
-            background: '#f0f8ff', 
-            borderRadius: '4px',
-            border: '1px solid #ddd'
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
-              <div style={{ flex: 1 }}>
-                <p><strong>From: {msg.sender_username}</strong></p>
-                <p style={{ margin: '8px 0' }}>{msg.content}</p>
-                <small style={{ color: '#666' }}>{new Date(msg.timestamp).toLocaleString()}</small>
-              </div>
-              <button 
-                onClick={() => handleDeleteFromVault(msg.id)}
-                style={{ 
-                  padding: '5px 10px', 
-                  cursor: 'pointer', 
-                  background: '#dc3545', 
-                  color: 'white', 
-                  border: 'none', 
-                  borderRadius: '4px',
-                  marginLeft: '10px'
-                }}
-              >
-                🗑️
-              </button>
-            </div>
-          </div>
-        ))
-      ) : (
-        <p style={{ color: '#999' }}>No saved messages yet. Click "Save" on important messages to keep them here.</p>
-      )}
-      <button onClick={onClose} style={{ marginTop: '15px', padding: '8px 12px', cursor: 'pointer' }}>
-        Close
-      </button>
-    </div>
-  );
-}
-
 function App() {
   const [token, setToken] = useState(null);
   const [username, setUsername] = useState(null);
   const [friends, setFriends] = useState([]);
   const [selectedFriend, setSelectedFriend] = useState(null);
   const [showRequests, setShowRequests] = useState(false);
-  const [showVault, setShowVault] = useState(false);
 
   React.useEffect(() => {
     if (token) {
@@ -560,6 +461,27 @@ function App() {
         .catch(err => console.error(err));
     }
   }, [token]);
+
+  // Cleanup ephemeral messages when switching chats
+  const previousFriendRef = React.useRef(null);
+
+  React.useEffect(() => {
+    // If we have a token and the selected friend changed from previous
+    if (token && previousFriendRef.current && previousFriendRef.current.id !== selectedFriend?.id) {
+      // Cleanup the previous friend's ephemeral messages
+      fetch('http://localhost:8000/api/cleanup-ephemeral/', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ friend_id: previousFriendRef.current.id })
+      }).catch(err => console.error('Cleanup error:', err));
+    }
+    
+    // Update the ref to current friend
+    previousFriendRef.current = selectedFriend;
+  }, [selectedFriend, token]);
 
   const handleAcceptRequest = (requestId) => {
     fetch('http://localhost:8000/api/accept-request/', {
@@ -583,7 +505,18 @@ function App() {
   };
 
   const handleLogout = () => {
-    setToken(null); // Messages automatically cleared from RAM
+    // Cleanup ephemeral messages for the last selected friend before logging out
+    if (selectedFriend && token) {
+      fetch('http://localhost:8000/api/cleanup-ephemeral/', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ friend_id: selectedFriend.id })
+      }).catch(err => console.error('Logout cleanup error:', err));
+    }
+    setToken(null);
   };
 
   if (!token) {
@@ -592,7 +525,7 @@ function App() {
 
   return (
     <div>
-      <TopBar currentUser={username} onLogout={handleLogout} onShowRequests={() => setShowRequests(true)} onShowVault={() => setShowVault(true)} />
+      <TopBar currentUser={username} onLogout={handleLogout} onShowRequests={() => setShowRequests(true)} />
       <div style={{ display: 'flex' }}>
         <SideBar friends={friends} onSelectFriend={setSelectedFriend} token={token} onFriendsUpdated={() => {
           fetch('http://localhost:8000/api/list-friends/', {
@@ -610,7 +543,6 @@ function App() {
         )}
       </div>
       {showRequests && <FriendRequests token={token} onClose={() => setShowRequests(false)} onAccept={handleAcceptRequest} />}
-      {showVault && <Vault token={token} onClose={() => setShowVault(false)} />}
     </div>
   );
 }
