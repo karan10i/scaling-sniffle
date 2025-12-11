@@ -37,11 +37,9 @@ class Message(models.Model):
     content = models.TextField()
     timestamp = models.DateTimeField(auto_now_add=True)
     
-    # Delivery tracking
-    delivered = models.BooleanField(default=False)  # True when receiver opens the chat
-    
     # Vault tracking (Silent Save)
-    is_saved = models.BooleanField(default=False)  # True if receiver saves to vault
+    # Messages only stored in Postgres if explicitly saved to vault
+    is_saved = models.BooleanField(default=True)  # Always True for vault messages
     saved_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='saved_messages', null=True, blank=True)  # Who saved it
 
     def __str__(self):

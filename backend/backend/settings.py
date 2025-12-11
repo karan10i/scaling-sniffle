@@ -13,6 +13,9 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 from pathlib import Path
 import os
 from dotenv import load_dotenv
+import redis 
+
+redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
 
 load_dotenv()
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
