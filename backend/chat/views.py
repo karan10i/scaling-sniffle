@@ -482,3 +482,139 @@ class CleanupEphemeralView(generics.GenericAPIView):
         
         return Response({'message': 'Ephemeral messages cleaned up'}, status=status.HTTP_200_OK)
 
+
+# ============ ENCRYPTION KEY MANAGEMENT ENDPOINTS ============
+
+class UploadKeysView(generics.GenericAPIView):
+    """
+    User uploads their identity key + batch of one-time keys after login.
+    This allows other users to establish encrypted sessions with them.
+    
+    POST /api/keys/upload/
+    Body: {
+        "identityKey": "base64...",
+        "signingKey": "base64...",
+        "oneTimeKeys": {"AAAAAQ": "base64...", "AAAAAg": "base64...", ...}
+    }
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        from .models import UserKeys, OneTimeKeys
+        
+        identity_key = request.data.get('identityKey')
+        signing_key = request.data.get('signingKey')
+        one_time_keys = request.data.get('oneTimeKeys', {})
+        
+        if not identity_key or not signing_key:
+            return Response(
+                {'error': 'identityKey and signingKey are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Save/update user's identity keys
+        UserKeys.objects.update_or_create(
+            user=request.user,
+            defaults={
+                'identity_key': identity_key,
+                'signing_key': signing_key
+            }
+        )
+        
+        # Save one-time keys (can be called multiple times to replenish)
+        keys_added = 0
+        for key_id, key_value in one_time_keys.items():
+            _, created = OneTimeKeys.objects.get_or_create(
+                user=request.user,
+                key_id=key_id,
+                defaults={'key_value': key_value}
+            )
+            if created:
+                keys_added += 1
+        
+        return Response({
+            'message': 'Keys registered successfully',
+            'oneTimeKeysAdded': keys_added
+        }, status=status.HTTP_201_CREATED)
+
+
+class QueryKeysView(generics.GenericAPIView):
+    """
+    Sender fetches recipient's identity key + one OTK to establish a session.
+    The OTK is marked as used after being fetched (one-time use only).
+    
+    GET /api/keys/query/<username>/
+    Returns: {
+        "identityKey": "base64...",
+        "signingKey": "base64...",
+        "oneTimeKey": "base64...",
+        "oneTimeKeyId": "AAAAAQ"
+    }
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request, username):
+        from .models import UserKeys, OneTimeKeys
+        
+        try:
+            target_user = User.objects.get(username=username)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get user's identity keys
+        try:
+            user_keys = target_user.keys
+        except UserKeys.DoesNotExist:
+            return Response(
+                {'error': 'User has not uploaded encryption keys'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get an available one-time key
+        otk = target_user.one_time_keys.filter(is_used=False).first()
+        
+        if not otk:
+            return Response(
+                {'error': 'No one-time keys available. User needs to replenish.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Mark OTK as used (consumed)
+        otk.is_used = True
+        otk.save()
+        
+        return Response({
+            'identityKey': user_keys.identity_key,
+            'signingKey': user_keys.signing_key,
+            'oneTimeKey': otk.key_value,
+            'oneTimeKeyId': otk.key_id,
+        })
+
+
+class GetOwnKeysView(generics.GenericAPIView):
+    """
+    Get current user's own public keys and OTK count.
+    Useful for checking if keys need to be replenished.
+    
+    GET /api/keys/me/
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        from .models import UserKeys, OneTimeKeys
+        
+        try:
+            user_keys = request.user.keys
+            available_otks = request.user.one_time_keys.filter(is_used=False).count()
+            
+            return Response({
+                'hasKeys': True,
+                'identityKey': user_keys.identity_key,
+                'signingKey': user_keys.signing_key,
+                'availableOneTimeKeys': available_otks
+            })
+        except UserKeys.DoesNotExist:
+            return Response({
+                'hasKeys': False,
+                'availableOneTimeKeys': 0
+            })

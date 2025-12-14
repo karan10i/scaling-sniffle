@@ -3,7 +3,8 @@ from .views import (
     SignupView, LoginView, SearchUsersView, AddFriendView, ListFriendsView, UserProfileView,
     SendFriendRequestView, ListPendingRequestsView, AcceptFriendRequestView, RejectFriendRequestView,
     SendMessageView, GetMessagesView,
-    SaveMessageToVaultView, ListVaultMessagesView, DeleteFromVaultView, CleanupEphemeralView
+    SaveMessageToVaultView, ListVaultMessagesView, DeleteFromVaultView, CleanupEphemeralView,
+    UploadKeysView, QueryKeysView, GetOwnKeysView
 )
 
 urlpatterns = [
@@ -29,4 +30,9 @@ urlpatterns = [
     
     # Cleanup endpoints
     path('cleanup-ephemeral/', CleanupEphemeralView.as_view(), name='cleanup-ephemeral'),
+    
+    # Encryption key management endpoints (Matrix/Olm E2EE)
+    path('keys/upload/', UploadKeysView.as_view(), name='upload-keys'),
+    path('keys/query/<str:username>/', QueryKeysView.as_view(), name='query-keys'),
+    path('keys/me/', GetOwnKeysView.as_view(), name='get-own-keys'),
 ]

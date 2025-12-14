@@ -44,3 +44,40 @@ class Message(models.Model):
 
     def __str__(self):
         return f"From {self.sender.username} to {self.receiver.username} at {self.timestamp}"
+
+
+# ============ ENCRYPTION MODELS (Matrix/Olm E2EE) ============
+
+class UserKeys(models.Model):
+    """
+    Store public keys for each user.
+    Server acts as a key directory - it never sees private keys.
+    """
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='keys')
+    identity_key = models.CharField(max_length=255)      # Curve25519 for encryption
+    signing_key = models.CharField(max_length=255)       # Ed25519 for signatures
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Keys for {self.user.username}"
+
+
+class OneTimeKeys(models.Model):
+    """
+    Disposable keys for initial key exchange (X3DH handshake).
+    Each OTK can only be used once to establish a session.
+    """
+    user = models.ForeignKey(User, related_name='one_time_keys', on_delete=models.CASCADE)
+    key_id = models.CharField(max_length=50)
+    key_value = models.CharField(max_length=255)
+    is_used = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name_plural = "One Time Keys"
+        unique_together = ('user', 'key_id')
+
+    def __str__(self):
+        status = "used" if self.is_used else "available"
+        return f"OTK {self.key_id} for {self.user.username} ({status})"

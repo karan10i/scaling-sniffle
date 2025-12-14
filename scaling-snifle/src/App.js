@@ -2,6 +2,29 @@ import React, { useState } from 'react';
 import Auth from './components/Auth';
 import './App.css';
 
+// Encryption imports
+import { 
+  initializeOlm, 
+  getIdentityKeys, 
+  generateOneTimeKeys, 
+  markKeysAsPublished,
+  clearOlmData,
+  isOlmInitialized
+} from './services/encryption';
+import {
+  createOutboundSession,
+  createInboundSession,
+  hasSession,
+  encryptMessage,
+  decryptMessage,
+  clearAllSessions
+} from './services/olmSession';
+import {
+  encryptForVault,
+  decryptFromVault,
+  getOrCreateVaultKey
+} from './services/vaultEncryption';
+
 function TopBar({ currentUser, onLogout, onShowRequests }) {
   return (
     <div style={{
@@ -175,21 +198,134 @@ function SideBar({ friends, onSelectFriend, token, onFriendsUpdated }) {
   );
 }
 
-function ChatUI({ selectedFriend, token }) {
+function ChatUI({ selectedFriend, token, username }) {
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState([]); // Server-stored messages
+  const [encryptionStatus, setEncryptionStatus] = useState('initializing');
 
-  const fetchMessages = React.useCallback(() => {
-    if (selectedFriend && token) {
-      fetch(`http://localhost:8000/api/get-messages/?user_id=${selectedFriend.id}`, {
+  // Ensure encryption session exists with this friend
+  const ensureEncryptionSession = React.useCallback(async () => {
+    if (!selectedFriend || !isOlmInitialized()) {
+      setEncryptionStatus('not-initialized');
+      return false;
+    }
+
+    // Check if we already have a session
+    if (hasSession(selectedFriend.id)) {
+      setEncryptionStatus('ready');
+      return true;
+    }
+
+    try {
+      // Fetch friend's keys from server
+      const res = await fetch(`http://localhost:8000/api/keys/query/${selectedFriend.username}/`, {
         headers: { 'Authorization': `Bearer ${token}` }
-      })
-        .then(res => res.json())
-        .then(data => {
-          // Load all messages from server (including undelivered and vault)
-          setMessages(data.messages || []);
-        })
-        .catch(err => console.error(err));
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        console.warn('Could not fetch friend keys:', data.error);
+        setEncryptionStatus('no-keys');
+        return false;
+      }
+
+      const keysData = await res.json();
+      
+      // Create outbound session
+      createOutboundSession(
+        selectedFriend.id,
+        keysData.identityKey,
+        keysData.oneTimeKey
+      );
+
+      setEncryptionStatus('ready');
+      return true;
+    } catch (err) {
+      console.error('Failed to establish encryption session:', err);
+      setEncryptionStatus('error');
+      return false;
+    }
+  }, [selectedFriend, token]);
+
+  // Initialize encryption session when friend is selected
+  React.useEffect(() => {
+    if (selectedFriend && token) {
+      ensureEncryptionSession();
+    }
+  }, [selectedFriend, token, ensureEncryptionSession]);
+
+  const fetchMessages = React.useCallback(async () => {
+    if (selectedFriend && token) {
+      try {
+        const res = await fetch(`http://localhost:8000/api/get-messages/?user_id=${selectedFriend.id}`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        const data = await res.json();
+        const rawMessages = data.messages || [];
+
+        // Decrypt messages
+        const decryptedMessages = await Promise.all(rawMessages.map(async (msg) => {
+          try {
+            // If message is from Redis (encrypted with Olm)
+            if (msg.source === 'redis') {
+              // Try to parse as encrypted JSON
+              try {
+                const encrypted = JSON.parse(msg.content);
+                if (encrypted.type !== undefined && encrypted.body) {
+                  // Determine the friendId based on who sent it
+                  const friendId = msg.sender_id === selectedFriend.id 
+                    ? selectedFriend.id 
+                    : selectedFriend.id;
+                  
+                  // For incoming messages without session, create inbound session
+                  if (encrypted.type === 0 && !hasSession(friendId)) {
+                    // We need the sender's identity key for inbound session
+                    // For now, try to fetch it
+                    try {
+                      const keysRes = await fetch(`http://localhost:8000/api/keys/query/${selectedFriend.username}/`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                      });
+                      if (keysRes.ok) {
+                        const keysData = await keysRes.json();
+                        createInboundSession(friendId, keysData.identityKey, encrypted.body);
+                      }
+                    } catch (e) {
+                      console.warn('Could not create inbound session:', e);
+                    }
+                  }
+
+                  const plaintext = decryptMessage(friendId, encrypted.type, encrypted.body);
+                  return { ...msg, content: plaintext };
+                }
+              } catch (parseErr) {
+                // Not encrypted JSON, return as-is (legacy unencrypted message)
+                return msg;
+              }
+            }
+            
+            // If message is from vault (encrypted with AES)
+            if (msg.source === 'vault') {
+              try {
+                const plaintext = await decryptFromVault(msg.content);
+                return { ...msg, content: plaintext };
+              } catch (vaultErr) {
+                console.warn('Vault decryption failed, showing raw content:', vaultErr.message);
+                // Return the message as-is - it might be unencrypted legacy or from a different session
+                return { ...msg, decryptionFailed: true };
+              }
+            }
+
+            return msg;
+          } catch (decryptErr) {
+            console.error('Decryption error for message:', decryptErr);
+            return { ...msg, content: '[Decryption failed]', decryptionFailed: true };
+          }
+        }));
+
+        setMessages(decryptedMessages);
+      } catch (err) {
+        console.error('Fetch messages error:', err);
+      }
     }
   }, [selectedFriend, token]);
 
@@ -203,6 +339,22 @@ function ChatUI({ selectedFriend, token }) {
   const handleSendMessage = async () => {
     if (message.trim()) {
       try {
+        let contentToSend = message;
+
+        // Try to encrypt the message if encryption is ready
+        if (encryptionStatus === 'ready' && hasSession(selectedFriend.id)) {
+          try {
+            const encrypted = encryptMessage(selectedFriend.id, message);
+            contentToSend = JSON.stringify(encrypted);
+            console.log('Message encrypted successfully');
+          } catch (encryptErr) {
+            console.warn('Encryption failed, sending unencrypted:', encryptErr);
+            // Fall back to unencrypted message
+          }
+        } else {
+          console.warn('Encryption not ready, sending unencrypted message');
+        }
+
         const res = await fetch('http://localhost:8000/api/send-message/', {
           method: 'POST',
           headers: {
@@ -211,14 +363,17 @@ function ChatUI({ selectedFriend, token }) {
           },
           body: JSON.stringify({
             receiver_id: selectedFriend.id,
-            content: message
+            content: contentToSend
           })
         });
         
         if (res.ok) {
           const data = await res.json();
-          // Add message to state (now has real DB id)
-          setMessages(prev => [...prev, data.message_data]);
+          // Add message to state with decrypted content for display
+          setMessages(prev => [...prev, {
+            ...data.message_data,
+            content: message // Show original plaintext in UI
+          }]);
           setMessage("");
         } else {
           const data = await res.json();
@@ -235,6 +390,15 @@ function ChatUI({ selectedFriend, token }) {
       // Determine if current user is sender or receiver
       const isSender = msg.sender_username === username;
       
+      // Encrypt the message content for vault storage
+      let vaultContent = msg.content;
+      try {
+        vaultContent = await encryptForVault(msg.content);
+        console.log('Message encrypted for vault');
+      } catch (vaultEncryptErr) {
+        console.warn('Vault encryption failed, saving unencrypted:', vaultEncryptErr);
+      }
+      
       const res = await fetch('http://localhost:8000/api/save-to-vault/', {
         method: 'POST',
         headers: {
@@ -243,7 +407,7 @@ function ChatUI({ selectedFriend, token }) {
         },
         body: JSON.stringify({
           other_user_id: selectedFriend.id,
-          content: msg.content,
+          content: vaultContent,
           is_sender: isSender
         })
       });
@@ -274,8 +438,23 @@ function ChatUI({ selectedFriend, token }) {
       background: '#fff',
       height: 'calc(100vh - 60px)'
     }}>
-      <div style={{ padding: '15px', background: '#e0e0e0', borderBottom: '1px solid #ccc' }}>
-        <h3>Chat with {selectedFriend.user_name}</h3>
+      <div style={{ padding: '15px', background: '#e0e0e0', borderBottom: '1px solid #ccc', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h3 style={{ margin: 0 }}>Chat with {selectedFriend.user_name}</h3>
+        <div style={{ 
+          display: 'flex', 
+          alignItems: 'center', 
+          gap: '5px',
+          fontSize: '12px',
+          color: encryptionStatus === 'ready' ? '#4caf50' : '#ff9800'
+        }}>
+          <span style={{
+            width: '8px',
+            height: '8px',
+            borderRadius: '50%',
+            background: encryptionStatus === 'ready' ? '#4caf50' : '#ff9800'
+          }}></span>
+          {encryptionStatus === 'ready' ? '🔒 E2E Encrypted' : '⚠️ Unencrypted'}
+        </div>
       </div>
       
       <div style={{
@@ -450,6 +629,58 @@ function App() {
   const [friends, setFriends] = useState([]);
   const [selectedFriend, setSelectedFriend] = useState(null);
   const [showRequests, setShowRequests] = useState(false);
+  const [olmInitialized, setOlmInitialized] = useState(false);
+
+  // Initialize encryption and upload keys after login
+  const initializeEncryption = React.useCallback(async (authToken) => {
+    try {
+      // Initialize Olm
+      await initializeOlm();
+      console.log('Olm initialized successfully');
+
+      // Get identity keys
+      const identityKeys = getIdentityKeys();
+      
+      // Generate one-time keys
+      const oneTimeKeys = generateOneTimeKeys(10);
+
+      // Upload keys to server
+      const res = await fetch('http://localhost:8000/api/keys/upload/', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${authToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          identityKey: identityKeys.identityKey,
+          signingKey: identityKeys.signingKey,
+          oneTimeKeys: oneTimeKeys
+        })
+      });
+
+      if (res.ok) {
+        markKeysAsPublished();
+        console.log('Keys uploaded to server');
+        setOlmInitialized(true);
+      } else {
+        console.warn('Failed to upload keys:', await res.json());
+      }
+
+      // Initialize vault key
+      await getOrCreateVaultKey();
+      console.log('Vault key ready');
+
+    } catch (err) {
+      console.error('Encryption initialization error:', err);
+    }
+  }, []);
+
+  // Initialize encryption when token is set
+  React.useEffect(() => {
+    if (token) {
+      initializeEncryption(token);
+    }
+  }, [token, initializeEncryption]);
 
   React.useEffect(() => {
     if (token) {
@@ -516,7 +747,18 @@ function App() {
         body: JSON.stringify({ friend_id: selectedFriend.id })
       }).catch(err => console.error('Logout cleanup error:', err));
     }
+
+    // Clear encryption data (but keep vault key for saved messages)
+    clearAllSessions();
+    clearOlmData();
+    // Note: We intentionally don't clear vault key so saved messages 
+    // can be decrypted on next login from the same browser
+    setOlmInitialized(false);
+
     setToken(null);
+    setUsername(null);
+    setFriends([]);
+    setSelectedFriend(null);
   };
 
   if (!token) {
@@ -535,7 +777,7 @@ function App() {
             .then(data => setFriends(data.friends || []));
         }} />
         {selectedFriend ? (
-          <ChatUI selectedFriend={selectedFriend} token={token} />
+          <ChatUI selectedFriend={selectedFriend} token={token} username={username} />
         ) : (
           <div style={{ flex: 1, padding: '20px', background: '#fff' }}>
             <h2>Select a friend to chat</h2>
