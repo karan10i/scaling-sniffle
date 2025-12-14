@@ -35,8 +35,10 @@ export async function initializeOlm() {
   }
 
   try {
-    // Initialize the Olm WASM module
-    await Olm.init();
+    // Initialize the Olm WASM module with correct path to public folder
+    await Olm.init({
+      locateFile: () => '/olm.wasm'
+    });
     console.log('Olm WASM loaded successfully');
 
     // Create a new Olm account

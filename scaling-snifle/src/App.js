@@ -14,7 +14,6 @@ import {
 import {
   createOutboundSession,
   createInboundSession,
-  getSession,
   hasSession,
   encryptMessage,
   decryptMessage,
@@ -23,8 +22,7 @@ import {
 import {
   encryptForVault,
   decryptFromVault,
-  getOrCreateVaultKey,
-  clearVaultKey
+  getOrCreateVaultKey
 } from './services/vaultEncryption';
 
 function TopBar({ currentUser, onLogout, onShowRequests }) {
@@ -311,8 +309,9 @@ function ChatUI({ selectedFriend, token, username }) {
                 const plaintext = await decryptFromVault(msg.content);
                 return { ...msg, content: plaintext };
               } catch (vaultErr) {
-                // Might be unencrypted legacy vault message
-                return msg;
+                console.warn('Vault decryption failed, showing raw content:', vaultErr.message);
+                // Return the message as-is - it might be unencrypted legacy or from a different session
+                return { ...msg, decryptionFailed: true };
               }
             }
 
@@ -630,7 +629,7 @@ function App() {
   const [friends, setFriends] = useState([]);
   const [selectedFriend, setSelectedFriend] = useState(null);
   const [showRequests, setShowRequests] = useState(false);
-  const [encryptionReady, setEncryptionReady] = useState(false);
+  const [olmInitialized, setOlmInitialized] = useState(false);
 
   // Initialize encryption and upload keys after login
   const initializeEncryption = React.useCallback(async (authToken) => {
@@ -662,7 +661,7 @@ function App() {
       if (res.ok) {
         markKeysAsPublished();
         console.log('Keys uploaded to server');
-        setEncryptionReady(true);
+        setOlmInitialized(true);
       } else {
         console.warn('Failed to upload keys:', await res.json());
       }
@@ -749,11 +748,12 @@ function App() {
       }).catch(err => console.error('Logout cleanup error:', err));
     }
 
-    // Clear encryption data
+    // Clear encryption data (but keep vault key for saved messages)
     clearAllSessions();
     clearOlmData();
-    clearVaultKey();
-    setEncryptionReady(false);
+    // Note: We intentionally don't clear vault key so saved messages 
+    // can be decrypted on next login from the same browser
+    setOlmInitialized(false);
 
     setToken(null);
     setUsername(null);
